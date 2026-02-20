@@ -747,6 +747,39 @@ impl SystemSpecs {
             .ok()
     }
 
+    /// Override the primary GPU's VRAM with a user-specified value (in GB).
+    /// This is used by the `--memory` CLI flag when GPU autodetection fails.
+    /// If no GPU was detected, this creates a synthetic GPU entry.
+    pub fn with_gpu_memory_override(mut self, vram_gb: f64) -> Self {
+        if self.gpus.is_empty() {
+            // No GPU was detected; create a synthetic one.
+            let backend =
+                if cfg!(target_arch = "aarch64") || self.cpu_name.to_lowercase().contains("apple") {
+                    GpuBackend::Metal
+                } else {
+                    GpuBackend::Cuda
+                };
+            self.gpus.push(GpuInfo {
+                name: "User-specified GPU".to_string(),
+                vram_gb: Some(vram_gb),
+                backend,
+                count: 1,
+                unified_memory: false,
+            });
+            self.has_gpu = true;
+            self.gpu_vram_gb = Some(vram_gb);
+            self.gpu_name = Some("User-specified GPU".to_string());
+            self.gpu_count = 1;
+            self.backend = backend;
+        } else {
+            // Override the primary (first) GPU's VRAM.
+            self.gpus[0].vram_gb = Some(vram_gb);
+            self.gpu_vram_gb = Some(vram_gb);
+            self.has_gpu = true;
+        }
+        self
+    }
+
     pub fn display(&self) {
         println!("\n=== System Specifications ===");
         println!("CPU: {} ({} cores)", self.cpu_name, self.total_cpu_cores);
@@ -810,6 +843,34 @@ impl SystemSpecs {
             }
         }
         println!();
+    }
+}
+
+/// Parse a human-readable memory size string into gigabytes.
+/// Accepts formats: "32G", "32g", "32GB", "32gb", "32000M", "32000m", "32000MB", etc.
+/// Returns `None` if the input is malformed.
+pub fn parse_memory_size(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Split into numeric part and suffix
+    let num_end = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(s.len());
+    let (num_str, suffix) = s.split_at(num_end);
+    let value: f64 = num_str.parse().ok()?;
+    if value < 0.0 {
+        return None;
+    }
+
+    let suffix = suffix.trim().to_lowercase();
+    match suffix.as_str() {
+        "g" | "gb" | "gib" | "" => Some(value),                // already in GB
+        "m" | "mb" | "mib" => Some(value / 1024.0),            // MB → GB
+        "t" | "tb" | "tib" => Some(value * 1024.0),            // TB → GB
+        _ => None,
     }
 }
 

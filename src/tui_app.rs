@@ -121,7 +121,10 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        let specs = SystemSpecs::detect();
+        Self::with_specs(SystemSpecs::detect())
+    }
+
+    pub fn with_specs(specs: SystemSpecs) -> Self {
         let db = ModelDatabase::new();
 
         // Detect Ollama

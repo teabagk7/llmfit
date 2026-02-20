@@ -35,6 +35,11 @@ struct Cli {
     /// Output results as JSON (for tool integration)
     #[arg(long)]
     json: bool,
+
+    /// Override GPU VRAM size (e.g. "32G", "32000M", "1.5T").
+    /// Useful when GPU memory autodetection fails.
+    #[arg(long, value_name = "SIZE")]
+    memory: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -88,8 +93,27 @@ enum Commands {
     },
 }
 
-fn run_fit(perfect: bool, limit: Option<usize>, json: bool) {
+/// Detect system specs with optional GPU memory override.
+fn detect_specs(memory_override: &Option<String>) -> SystemSpecs {
     let specs = SystemSpecs::detect();
+    if let Some(mem_str) = memory_override {
+        match hardware::parse_memory_size(mem_str) {
+            Some(gb) => specs.with_gpu_memory_override(gb),
+            None => {
+                eprintln!(
+                    "Warning: could not parse --memory value '{}'. Expected format: 32G, 32000M, 1.5T",
+                    mem_str
+                );
+                specs
+            }
+        }
+    } else {
+        specs
+    }
+}
+
+fn run_fit(perfect: bool, limit: Option<usize>, json: bool, memory_override: &Option<String>) {
+    let specs = detect_specs(memory_override);
     let db = ModelDatabase::new();
 
     if !json {
@@ -119,7 +143,7 @@ fn run_fit(perfect: bool, limit: Option<usize>, json: bool) {
     }
 }
 
-fn run_tui() -> std::io::Result<()> {
+fn run_tui(memory_override: &Option<String>) -> std::io::Result<()> {
     // Setup terminal
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -133,7 +157,8 @@ fn run_tui() -> std::io::Result<()> {
     let mut terminal = ratatui::Terminal::new(backend)?;
 
     // Create app state
-    let mut app = tui_app::App::new();
+    let specs = detect_specs(memory_override);
+    let mut app = tui_app::App::with_specs(specs);
 
     // Main loop
     loop {
@@ -160,8 +185,8 @@ fn run_tui() -> std::io::Result<()> {
     Ok(())
 }
 
-fn run_recommend(limit: usize, use_case: Option<String>, min_fit: String, json: bool) {
-    let specs = SystemSpecs::detect();
+fn run_recommend(limit: usize, use_case: Option<String>, min_fit: String, json: bool, memory_override: &Option<String>) {
+    let specs = detect_specs(memory_override);
     let db = ModelDatabase::new();
 
     let mut fits: Vec<ModelFit> = db
@@ -221,7 +246,7 @@ fn main() {
     if let Some(command) = cli.command {
         match command {
             Commands::System => {
-                let specs = SystemSpecs::detect();
+                let specs = detect_specs(&cli.memory);
                 if cli.json {
                     display::display_json_system(&specs);
                 } else {
@@ -235,7 +260,7 @@ fn main() {
             }
 
             Commands::Fit { perfect, limit } => {
-                run_fit(perfect, limit, cli.json);
+                run_fit(perfect, limit, cli.json, &cli.memory);
             }
 
             Commands::Search { query } => {
@@ -246,7 +271,7 @@ fn main() {
 
             Commands::Info { model } => {
                 let db = ModelDatabase::new();
-                let specs = SystemSpecs::detect();
+                let specs = detect_specs(&cli.memory);
                 let results = db.find_model(&model);
 
                 if results.is_empty() {
@@ -276,7 +301,7 @@ fn main() {
                 min_fit,
                 json,
             } => {
-                run_recommend(limit, use_case, min_fit, json);
+                run_recommend(limit, use_case, min_fit, json, &cli.memory);
             }
         }
         return;
@@ -284,12 +309,12 @@ fn main() {
 
     // If --cli flag, use classic fit output
     if cli.cli {
-        run_fit(cli.perfect, cli.limit, cli.json);
+        run_fit(cli.perfect, cli.limit, cli.json, &cli.memory);
         return;
     }
 
     // Default: launch TUI
-    if let Err(e) = run_tui() {
+    if let Err(e) = run_tui(&cli.memory) {
         eprintln!("Error running TUI: {}", e);
         std::process::exit(1);
     }

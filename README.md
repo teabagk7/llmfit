@@ -136,6 +136,27 @@ llmfit recommend --json --limit 5
 llmfit recommend --json --use-case coding --limit 3
 ```
 
+### GPU memory override
+
+GPU VRAM autodetection can fail on some systems (e.g. broken `nvidia-smi`, VMs, passthrough setups). Use `--memory` to manually specify your GPU's VRAM:
+
+```sh
+# Override with 32 GB VRAM
+llmfit --memory=32G
+
+# Megabytes also work (32000 MB ≈ 31.25 GB)
+llmfit --memory=32000M
+
+# Works with all modes: TUI, CLI, and subcommands
+llmfit --memory=24G --cli
+llmfit --memory=24G fit --perfect -n 5
+llmfit --memory=24G system
+llmfit --memory=24G info "Llama-3.1-70B"
+llmfit --memory=24G recommend --json
+```
+
+Accepted suffixes: `G`/`GB`/`GiB` (gigabytes), `M`/`MB`/`MiB` (megabytes), `T`/`TB`/`TiB` (terabytes). Case-insensitive. If no GPU was detected, the override creates a synthetic GPU entry so models are scored for GPU inference.
+
 ### JSON output
 
 Add `--json` to any subcommand for machine-readable output:
@@ -347,6 +368,8 @@ llmfit's database uses HuggingFace model names (e.g. `Qwen/Qwen2.5-Coder-14B-Ins
 | Intel Arc (discrete) | sysfs (`mem_info_vram_total`) | Exact dedicated VRAM |
 | Intel Arc (integrated) | `lspci` | Shared system memory |
 | Apple Silicon | `system_profiler` | Unified memory (= system RAM) |
+
+If autodetection fails or reports incorrect values, use `--memory=<SIZE>` to override (see [GPU memory override](#gpu-memory-override) above).
 
 ---
 
