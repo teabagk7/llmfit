@@ -3,17 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>llmfit — LLM Hardware Fitting</title>
+  <title>llmfit</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header>
-    <h1>🦙 llmfit</h1>
-    <p class="subtitle">Right-size LLM models to your hardware</p>
-  </header>
-
   <section id="system-panel">
-    <h2>System Specs</h2>
+    <h2>System</h2>
     <div id="specs-grid" class="specs-grid">
       <div class="spec-card">
         <span class="spec-label">CPU</span>
@@ -21,13 +16,19 @@
         <span id="cpu-cores" class="spec-detail"></span>
       </div>
       <div class="spec-card">
-        <span class="spec-label">RAM</span>
-        <span id="ram" class="spec-value">—</span>
+        <span class="spec-label">Total RAM</span>
+        <span id="ram-total" class="spec-value">—</span>
       </div>
       <div class="spec-card">
-        <span class="spec-label">GPU</span>
-        <span id="gpu-name" class="spec-value">—</span>
-        <span id="gpu-vram" class="spec-detail"></span>
+        <span class="spec-label">Available RAM</span>
+        <span id="ram-available" class="spec-value">—</span>
+      </div>
+      <div id="gpus-container">
+        <!-- GPU cards injected by JS -->
+      </div>
+      <div class="spec-card" id="memory-arch-card" style="display:none">
+        <span class="spec-label">Memory</span>
+        <span id="memory-arch" class="spec-value">—</span>
       </div>
     </div>
   </section>

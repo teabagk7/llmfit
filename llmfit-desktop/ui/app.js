@@ -14,13 +14,44 @@ async function loadSpecs() {
   try {
     const specs = await invoke('get_system_specs');
     if (!specs) return;
+
     document.getElementById('cpu-name').textContent = specs.cpu_name;
     document.getElementById('cpu-cores').textContent = specs.cpu_cores + ' cores';
-    document.getElementById('ram').textContent = specs.total_ram_gb.toFixed(1) + ' GB';
-    document.getElementById('gpu-name').textContent = specs.gpu_name || 'No GPU detected';
-    document.getElementById('gpu-vram').textContent = specs.gpu_vram_gb > 0
-      ? specs.gpu_vram_gb.toFixed(1) + ' GB VRAM (' + specs.gpu_backend + ')'
-      : '';
+    document.getElementById('ram-total').textContent = specs.total_ram_gb.toFixed(1) + ' GB';
+    document.getElementById('ram-available').textContent = specs.available_ram_gb.toFixed(1) + ' GB';
+
+    // Render GPU cards
+    const container = document.getElementById('gpus-container');
+    container.innerHTML = '';
+
+    if (specs.gpus.length === 0) {
+      const card = document.createElement('div');
+      card.className = 'spec-card';
+      card.innerHTML = '<span class="spec-label">GPU</span>' +
+        '<span class="spec-value">No GPU detected</span>';
+      container.appendChild(card);
+    } else {
+      specs.gpus.forEach((gpu, i) => {
+        const card = document.createElement('div');
+        card.className = 'spec-card';
+        const label = specs.gpus.length > 1 ? 'GPU ' + (i + 1) : 'GPU';
+        const countStr = gpu.count > 1 ? ' ×' + gpu.count : '';
+        const vramStr = gpu.vram_gb != null ? gpu.vram_gb.toFixed(1) + ' GB VRAM' : 'Shared memory';
+        const backendStr = gpu.backend !== 'None' ? gpu.backend : '';
+        const details = [vramStr, backendStr].filter(Boolean).join(' · ');
+        card.innerHTML = '<span class="spec-label">' + esc(label) + '</span>' +
+          '<span class="spec-value">' + esc(gpu.name + countStr) + '</span>' +
+          '<span class="spec-detail">' + esc(details) + '</span>';
+        container.appendChild(card);
+      });
+    }
+
+    // Unified memory indicator
+    if (specs.unified_memory) {
+      const archCard = document.getElementById('memory-arch-card');
+      archCard.style.display = '';
+      document.getElementById('memory-arch').textContent = 'Unified (CPU + GPU shared)';
+    }
   } catch (e) {
     console.error('Failed to load specs:', e);
     document.getElementById('cpu-name').textContent = 'Error loading specs';

@@ -6,13 +6,22 @@ use llmfit_core::models::ModelDatabase;
 use serde::Serialize;
 
 #[derive(Serialize)]
+struct GpuInfoJs {
+    name: String,
+    vram_gb: Option<f64>,
+    backend: String,
+    count: u32,
+    unified_memory: bool,
+}
+
+#[derive(Serialize)]
 struct SystemInfo {
     total_ram_gb: f64,
+    available_ram_gb: f64,
     cpu_name: String,
     cpu_cores: usize,
-    gpu_name: String,
-    gpu_vram_gb: f64,
-    gpu_backend: String,
+    gpus: Vec<GpuInfoJs>,
+    unified_memory: bool,
 }
 
 #[derive(Serialize)]
@@ -33,21 +42,24 @@ struct ModelFitInfo {
 #[tauri::command]
 fn get_system_specs() -> Result<SystemInfo, String> {
     let specs = SystemSpecs::detect();
+    let gpus = specs
+        .gpus
+        .iter()
+        .map(|g| GpuInfoJs {
+            name: g.name.clone(),
+            vram_gb: g.vram_gb,
+            backend: format!("{:?}", g.backend),
+            count: g.count,
+            unified_memory: g.unified_memory,
+        })
+        .collect();
     Ok(SystemInfo {
         total_ram_gb: specs.total_ram_gb,
+        available_ram_gb: specs.available_ram_gb,
         cpu_name: specs.cpu_name.clone(),
         cpu_cores: specs.total_cpu_cores,
-        gpu_name: specs
-            .gpus
-            .first()
-            .map(|g| g.name.clone())
-            .unwrap_or_default(),
-        gpu_vram_gb: specs.gpus.first().and_then(|g| g.vram_gb).unwrap_or(0.0),
-        gpu_backend: specs
-            .gpus
-            .first()
-            .map(|g| format!("{:?}", g.backend))
-            .unwrap_or_else(|| "None".to_string()),
+        gpus,
+        unified_memory: specs.unified_memory,
     })
 }
 

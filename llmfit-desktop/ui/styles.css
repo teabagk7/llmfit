@@ -21,19 +21,17 @@ body {
   line-height: 1.5;
 }
 
-header {
-  margin-bottom: 24px;
-}
-
-h1 { font-size: 28px; font-weight: 700; }
 h2 { font-size: 18px; font-weight: 600; margin-bottom: 12px; color: var(--text-dim); }
-.subtitle { color: var(--text-dim); font-size: 14px; }
 
 .specs-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
-  margin-bottom: 32px;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+#gpus-container {
+  display: contents;
 }
 
 .spec-card {
