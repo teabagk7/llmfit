@@ -338,6 +338,27 @@ llmfit integrates with [Ollama](https://ollama.com) to detect which models you a
 - llmfit connects to `http://localhost:11434` (Ollama's default API port)
 - No configuration needed — if Ollama is running, llmfit detects it automatically
 
+### Remote Ollama instances
+
+To connect to Ollama running on a different machine or port, set the `OLLAMA_HOST` environment variable:
+
+```sh
+# Connect to Ollama on a specific IP and port
+OLLAMA_HOST="http://192.168.1.100:11434" llmfit
+
+# Connect via hostname  
+OLLAMA_HOST="http://ollama-server:666" llmfit
+
+# Works with all TUI and CLI commands
+OLLAMA_HOST="http://192.168.1.100:11434" llmfit --cli
+OLLAMA_HOST="http://192.168.1.100:11434" llmfit fit --perfect -n 5
+```
+
+This is useful for:
+- Running llmfit on one machine while Ollama serves from another (e.g., GPU server + laptop client)
+- Connecting to Ollama running in Docker containers with custom ports
+- Using Ollama behind reverse proxies or load balancers
+
 ### How it works
 
 On startup, llmfit queries `GET /api/tags` to list your installed Ollama models. Each installed model gets a green **✓** in the **Inst** column of the TUI. The system bar shows `Ollama: ✓ (N installed)`.
