@@ -48,6 +48,16 @@ jobs:
             os: macos-latest
             use-cross: false
 
+          # Windows x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use-cross: false
+
+          # Windows ARM64
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            use-cross: false
+
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -64,6 +74,7 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build
+        shell: bash
         run: |
           if [ "${{ matrix.use-cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }}
@@ -75,17 +86,28 @@ jobs:
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME}"
-          ASSET="${BINARY}-${TAG}-${{ matrix.target }}"
-          STAGING="/tmp/${ASSET}"
+          ASSET_NAME="${BINARY}-${TAG}-${{ matrix.target }}"
+          STAGING="${RUNNER_TEMP}/${ASSET_NAME}"
           mkdir -p "${STAGING}"
 
-          cp "target/${{ matrix.target }}/release/${BINARY}" "${STAGING}/"
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            EXE_EXT=".exe"
+            ARCHIVE_EXT=".zip"
+            COMPRESS_CMD="7z a ${ASSET_NAME}${ARCHIVE_EXT} ${ASSET_NAME}"
+          else
+            EXE_EXT=""
+            ARCHIVE_EXT=".tar.gz"
+            COMPRESS_CMD="tar czf ${ASSET_NAME}${ARCHIVE_EXT} ${ASSET_NAME}"
+          fi
+
+          cp "target/${{ matrix.target }}/release/${BINARY}${EXE_EXT}" "${STAGING}/"
           cp README.md LICENSE "${STAGING}/" 2>/dev/null || true
 
-          cd /tmp
-          tar czf "${ASSET}.tar.gz" "${ASSET}"
-          echo "ASSET=${ASSET}.tar.gz" >> "$GITHUB_ENV"
-          echo "ASSET_PATH=/tmp/${ASSET}.tar.gz" >> "$GITHUB_ENV"
+          cd "${RUNNER_TEMP}"
+          $COMPRESS_CMD
+
+          echo "ASSET=${ASSET_NAME}${ARCHIVE_EXT}" >> "$GITHUB_ENV"
+          echo "ASSET_PATH=${RUNNER_TEMP}/${ASSET_NAME}${ARCHIVE_EXT}" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -107,7 +129,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: artifacts/**/*.tar.gz
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
 
   publish-crate:
     needs: release
