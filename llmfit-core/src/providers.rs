@@ -1957,4 +1957,250 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].contains("GGUF"));
     }
+
+    // ── select_best_gguf ─────────────────────────────────────────────
+
+    #[test]
+    fn test_select_best_gguf_prefers_higher_quality() {
+        let files = vec![
+            ("model-Q2_K.gguf".to_string(), 2_000_000_000u64),
+            ("model-Q4_K_M.gguf".to_string(), 4_000_000_000u64),
+            ("model-Q8_0.gguf".to_string(), 8_000_000_000u64),
+        ];
+        let result = LlamaCppProvider::select_best_gguf(&files, 10.0);
+        assert!(result.is_some());
+        let (name, _) = result.unwrap();
+        assert!(name.contains("Q8_0"), "should prefer Q8, got: {}", name);
+    }
+
+    #[test]
+    fn test_select_best_gguf_respects_budget() {
+        let files = vec![
+            ("model-Q2_K.gguf".to_string(), 2_000_000_000u64),
+            ("model-Q4_K_M.gguf".to_string(), 4_000_000_000u64),
+            ("model-Q8_0.gguf".to_string(), 8_000_000_000u64),
+        ];
+        // Budget ~3.7GB → Q2_K fits
+        let result = LlamaCppProvider::select_best_gguf(&files, 3.7);
+        assert!(result.is_some());
+        let (name, _) = result.unwrap();
+        assert!(name.contains("Q2_K"), "should select Q2_K for 3.7GB budget, got: {}", name);
+    }
+
+    #[test]
+    fn test_select_best_gguf_nothing_fits() {
+        let files = vec![
+            ("model-Q2_K.gguf".to_string(), 8_000_000_000u64),
+        ];
+        let result = LlamaCppProvider::select_best_gguf(&files, 1.0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_select_best_gguf_skips_split_files() {
+        let files = vec![
+            ("model-Q4_K_M-00001-of-00003.gguf".to_string(), 4_000_000_000u64),
+            ("model-Q2_K.gguf".to_string(), 2_000_000_000u64),
+        ];
+        let result = LlamaCppProvider::select_best_gguf(&files, 10.0);
+        assert!(result.is_some());
+        let (name, _) = result.unwrap();
+        assert!(name.contains("Q2_K"), "should skip split file, got: {}", name);
+    }
+
+    #[test]
+    fn test_select_best_gguf_empty_list() {
+        let result = LlamaCppProvider::select_best_gguf(&[], 10.0);
+        assert!(result.is_none());
+    }
+
+    // ── is_split_file ────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_split_file() {
+        assert!(is_split_file("model-00001-of-00003.gguf"));
+        assert!(!is_split_file("model-Q4_K_M.gguf"));
+        assert!(!is_split_file("model.gguf"));
+    }
+
+    // ── urlencoding ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_urlencoding_ascii() {
+        assert_eq!(urlencoding::encode("hello"), "hello");
+        assert_eq!(urlencoding::encode("test-model_v1.0"), "test-model_v1.0");
+    }
+
+    #[test]
+    fn test_urlencoding_special_chars() {
+        assert_eq!(urlencoding::encode("hello world"), "hello%20world");
+        assert_eq!(urlencoding::encode("a+b"), "a%2Bb");
+        assert_eq!(urlencoding::encode("foo/bar"), "foo%2Fbar");
+    }
+
+    #[test]
+    fn test_urlencoding_empty() {
+        assert_eq!(urlencoding::encode(""), "");
+    }
+
+    // ── is_model_installed_llamacpp ──────────────────────────────────
+
+    #[test]
+    fn test_is_model_installed_llamacpp_exact() {
+        let mut installed = HashSet::new();
+        installed.insert("llama-3.1-8b-instruct".to_string());
+        assert!(is_model_installed_llamacpp("meta-llama/Llama-3.1-8B-Instruct", &installed));
+    }
+
+    #[test]
+    fn test_is_model_installed_llamacpp_stripped_suffixes() {
+        let mut installed = HashSet::new();
+        installed.insert("llama-3.1-8b".to_string());
+        assert!(is_model_installed_llamacpp("meta-llama/Llama-3.1-8B-Instruct", &installed));
+    }
+
+    #[test]
+    fn test_is_model_installed_llamacpp_not_installed() {
+        let installed = HashSet::new();
+        assert!(!is_model_installed_llamacpp("meta-llama/Llama-3.1-8B-Instruct", &installed));
+    }
+
+    // ── gguf_pull_tag ────────────────────────────────────────────────
+
+    #[test]
+    fn test_gguf_pull_tag_known() {
+        let tag = gguf_pull_tag("meta-llama/Llama-3.1-8B-Instruct");
+        assert!(tag.is_some());
+        assert!(tag.unwrap().contains("GGUF"));
+    }
+
+    #[test]
+    fn test_gguf_pull_tag_unknown() {
+        assert!(gguf_pull_tag("totally-unknown/model-xyz").is_none());
+    }
+
+    // ── has_ollama_mapping ───────────────────────────────────────────
+
+    #[test]
+    fn test_has_ollama_mapping_known() {
+        assert!(has_ollama_mapping("meta-llama/Llama-3.1-8B-Instruct"));
+        assert!(has_ollama_mapping("Qwen/Qwen2.5-7B-Instruct"));
+    }
+
+    #[test]
+    fn test_has_ollama_mapping_unknown() {
+        assert!(!has_ollama_mapping("totally-unknown/model-xyz"));
+    }
+
+    // ── ollama_pull_tag ──────────────────────────────────────────────
+
+    #[test]
+    fn test_ollama_pull_tag_known() {
+        let tag = ollama_pull_tag("meta-llama/Llama-3.1-8B-Instruct");
+        assert_eq!(tag, Some("llama3.1:8b".to_string()));
+    }
+
+    #[test]
+    fn test_ollama_pull_tag_unknown() {
+        assert!(ollama_pull_tag("totally-unknown/model-xyz").is_none());
+    }
+
+    // ── mlx_pull_tag ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_mlx_pull_tag_prefers_4bit() {
+        let tag = mlx_pull_tag("meta-llama/Llama-3.1-8B-Instruct");
+        assert!(tag.ends_with("-4bit"), "should prefer 4bit, got: {}", tag);
+    }
+
+    #[test]
+    fn test_mlx_pull_tag_fallback() {
+        let tag = mlx_pull_tag("SomeUnknown/Model-7B");
+        assert!(!tag.is_empty());
+    }
+
+    // ── ollama_installed_matches_candidate ────────────────────────────
+
+    #[test]
+    fn test_ollama_installed_matches_exact() {
+        assert!(ollama_installed_matches_candidate("llama3.1:8b", "llama3.1:8b"));
+    }
+
+    #[test]
+    fn test_ollama_installed_matches_variant_suffix() {
+        assert!(ollama_installed_matches_candidate("llama3.1:8b-instruct-q4_K_M", "llama3.1:8b"));
+    }
+
+    #[test]
+    fn test_ollama_installed_no_match() {
+        assert!(!ollama_installed_matches_candidate("qwen2.5:7b", "llama3.1:8b"));
+    }
+
+    // ── parse_repo_gguf_entries ──────────────────────────────────────
+
+    #[test]
+    fn test_parse_repo_gguf_entries_valid() {
+        let entries = vec![
+            serde_json::json!({"path": "model-Q4_K_M.gguf", "size": 4_000_000_000u64}),
+            serde_json::json!({"path": "model-Q8_0.gguf", "size": 8_000_000_000u64}),
+        ];
+        let files = parse_repo_gguf_entries(entries);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].0, "model-Q4_K_M.gguf");
+        assert_eq!(files[1].0, "model-Q8_0.gguf");
+    }
+
+    #[test]
+    fn test_parse_repo_gguf_entries_missing_size_defaults_to_zero() {
+        let entries = vec![
+            serde_json::json!({"path": "model.gguf"}),
+        ];
+        let files = parse_repo_gguf_entries(entries);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].1, 0);
+    }
+
+    #[test]
+    fn test_parse_repo_gguf_entries_skips_non_gguf() {
+        let entries = vec![
+            serde_json::json!({"path": "README.md", "size": 1000u64}),
+            serde_json::json!({"path": "config.json", "size": 500u64}),
+            serde_json::json!({"path": "model.gguf", "size": 4_000_000_000u64}),
+        ];
+        let files = parse_repo_gguf_entries(entries);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0, "model.gguf");
+    }
+
+    // ── hf_name_to_mlx_candidates edge cases ─────────────────────────
+
+    #[test]
+    fn test_hf_name_to_mlx_candidates_bare_model_name() {
+        let candidates = hf_name_to_mlx_candidates("Phi-4");
+        assert!(candidates.iter().any(|c| c.contains("phi-4")));
+        assert!(candidates.iter().any(|c| c.ends_with("-4bit")));
+    }
+
+    #[test]
+    fn test_hf_name_to_mlx_candidates_no_duplicates() {
+        let candidates = hf_name_to_mlx_candidates("meta-llama/Llama-3.1-8B-Instruct");
+        let unique: HashSet<_> = candidates.iter().collect();
+        assert_eq!(unique.len(), candidates.len(), "candidates should have no duplicates: {:?}", candidates);
+    }
+
+    // ── hf_name_to_ollama_candidates edge cases ──────────────────────
+
+    #[test]
+    fn test_hf_name_to_ollama_candidates_unknown_returns_empty() {
+        let candidates = hf_name_to_ollama_candidates("totally-unknown/model-xyz");
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_hf_name_to_ollama_candidates_multiple_models() {
+        // Test a variety of known models
+        assert!(!hf_name_to_ollama_candidates("meta-llama/Llama-3.1-8B-Instruct").is_empty());
+        assert!(!hf_name_to_ollama_candidates("Qwen/Qwen2.5-Coder-7B-Instruct").is_empty());
+        assert!(!hf_name_to_ollama_candidates("google/gemma-2-9b-it").is_empty());
+    }
 }
