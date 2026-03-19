@@ -948,12 +948,16 @@ impl SystemSpecs {
                 let card_path = entry.path();
                 let device_path = card_path.join("device");
 
-                // Only process card* entries (skip renderD*, controlD*)
+                // Only process card<N> entries (skip renderD*, controlD*,
+                // and connector entries like card1-DP-1, card2-HDMI-A-3)
                 let card_name = card_path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("");
-                if !card_name.starts_with("card") {
+                if !card_name.starts_with("card")
+                    || card_name.len() <= 4
+                    || !card_name[4..].chars().all(|c| c.is_ascii_digit())
+                {
                     continue;
                 }
 
@@ -1019,15 +1023,24 @@ impl SystemSpecs {
 
                 let is_discrete = is_xe || vram_gb.is_some() || known_info.is_some();
 
-                // Skip integrated GPUs with no VRAM unless they're Arc-class
+                // Skip integrated GPUs with no VRAM unless THIS device is Arc-class
+                // (e.g. Meteor Lake integrated Arc). Check only the lspci line
+                // matching this device's PCI slot, not the entire lspci output.
                 if !is_discrete && vram_gb.is_none() {
-                    let has_arc = lspci.as_ref().is_some_and(|text| {
-                        text.lines().any(|l| {
-                            let lower = l.to_lowercase();
-                            lower.contains("intel") && lower.contains("arc")
-                        })
-                    });
-                    if !has_arc {
+                    let uevent = std::fs::read_to_string(device_path.join("uevent"))
+                        .unwrap_or_default();
+                    let slot = uevent
+                        .lines()
+                        .find(|l| l.starts_with("PCI_SLOT_NAME="))
+                        .and_then(|l| l.strip_prefix("PCI_SLOT_NAME="))
+                        .unwrap_or("");
+                    let is_arc_device = !slot.is_empty()
+                        && lspci.as_ref().is_some_and(|text| {
+                            text.lines().any(|l| {
+                                l.contains(slot) && l.to_lowercase().contains("arc")
+                            })
+                        });
+                    if !is_arc_device {
                         continue;
                     }
                     vram_gb = Some(0.0);
