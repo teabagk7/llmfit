@@ -1097,14 +1097,12 @@ impl SystemSpecs {
             }
         }
 
-        // Deduplicate same-model GPUs: aggregate VRAM and increment count
+        // Deduplicate same-model GPUs: increment count, keep per-card VRAM
+        // (the display layer multiplies vram_gb × count for the total)
         let mut deduped: Vec<GpuInfo> = Vec::new();
         for gpu in gpus {
             if let Some(existing) = deduped.iter_mut().find(|g| g.name == gpu.name) {
                 existing.count += 1;
-                if let (Some(ev), Some(gv)) = (existing.vram_gb.as_mut(), gpu.vram_gb) {
-                    *ev += gv;
-                }
             } else {
                 deduped.push(gpu);
             }
