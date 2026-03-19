@@ -193,17 +193,16 @@ impl SystemSpecs {
             }
         }
 
-        // Intel Arc via sysfs
-        if let Some(vram) = Self::detect_intel_gpu() {
-            let already_found = gpus.iter().any(|g| g.name.to_lowercase().contains("intel"));
+        // Intel GPUs (Arc discrete via sysfs/xe, integrated via lspci)
+        let intel_gpus = Self::detect_intel_gpus();
+        for intel_gpu in intel_gpus {
+            let already_found = gpus.iter().any(|g| {
+                let existing_lower = g.name.to_lowercase();
+                let intel_lower = intel_gpu.name.to_lowercase();
+                existing_lower.contains(&intel_lower) || intel_lower.contains(&existing_lower)
+            });
             if !already_found {
-                gpus.push(GpuInfo {
-                    name: "Intel Arc".to_string(),
-                    vram_gb: Some(vram),
-                    backend: GpuBackend::Sycl,
-                    count: 1,
-                    unified_memory: false,
-                });
+                gpus.push(intel_gpu);
             }
         }
 
@@ -935,17 +934,28 @@ impl SystemSpecs {
         }
     }
 
-    /// Detect Intel Arc / Intel integrated GPU via sysfs or lspci.
-    /// Intel Arc GPUs (A370M, A770, etc.) have dedicated VRAM exposed via
-    /// the DRM subsystem at /sys/class/drm/card*/device/. Even integrated
-    /// Intel GPUs that share system RAM are useful for inference via SYCL/oneAPI.
-    fn detect_intel_gpu() -> Option<f64> {
-        // Try sysfs first: works for Intel discrete (Arc) GPUs on Linux.
-        // Walk /sys/class/drm/card*/device/ looking for Intel vendor ID (0x8086).
+    /// Detect Intel discrete and integrated GPUs via sysfs, xe driver, and lspci.
+    /// Supports both i915 (mem_info_vram_total) and xe driver paths, multi-GPU
+    /// configurations (e.g. Intel Arc Pro B60 Dual), and PCI device ID lookup
+    /// for GPUs not yet in the system's pci.ids database.
+    fn detect_intel_gpus() -> Vec<GpuInfo> {
+        let mut gpus: Vec<GpuInfo> = Vec::new();
+        let lspci = Self::lspci_output();
+
+        // Walk /sys/class/drm/card* looking for Intel GPUs
         if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
             for entry in entries.flatten() {
                 let card_path = entry.path();
                 let device_path = card_path.join("device");
+
+                // Only process card* entries (skip renderD*, controlD*)
+                let card_name = card_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                if !card_name.starts_with("card") {
+                    continue;
+                }
 
                 // Check vendor ID matches Intel (0x8086)
                 let vendor_path = device_path.join("vendor");
@@ -955,45 +965,183 @@ impl SystemSpecs {
                     continue;
                 }
 
-                // Look for total VRAM via DRM memory info
-                // Intel discrete GPUs expose this under drm/card*/device/mem_info_vram_total
-                let vram_path = card_path.join("device/mem_info_vram_total");
+                // Read the PCI device ID for identification
+                let device_id = std::fs::read_to_string(device_path.join("device"))
+                    .map(|d| d.trim().to_string())
+                    .unwrap_or_default();
+
+                // Check which driver is bound (i915 vs xe)
+                let driver = std::fs::read_link(device_path.join("driver"))
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
+                let is_xe = driver.as_deref() == Some("xe");
+
+                // Try to get VRAM via i915 sysfs path (mem_info_vram_total)
+                let mut vram_gb: Option<f64> = None;
+                let vram_path = device_path.join("mem_info_vram_total");
                 if let Ok(vram_str) = std::fs::read_to_string(&vram_path)
                     && let Ok(vram_bytes) = vram_str.trim().parse::<u64>()
                     && vram_bytes > 0
                 {
-                    let vram_gb = vram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-                    return Some(vram_gb);
+                    vram_gb = Some(vram_bytes as f64 / (1024.0 * 1024.0 * 1024.0));
                 }
 
-                // For integrated Intel GPUs, check if it's an Arc-class device
-                // by looking for "Arc" in the device name via lspci
-                if let Some(text) = Self::lspci_output() {
-                    for line in text.lines() {
-                        let lower = line.to_lowercase();
-                        if lower.contains("intel") && lower.contains("arc") {
-                            // Intel Arc integrated (e.g. Arc Graphics in Meteor Lake)
-                            // These share system RAM; report None for VRAM and
-                            // let the caller know a GPU exists.
-                            return Some(0.0);
+                // For xe driver without mem_info_vram_total, try debugfs TTM info
+                if vram_gb.is_none() && is_xe {
+                    if let Some(card_num) = card_name.strip_prefix("card") {
+                        let ttm_path =
+                            format!("/sys/kernel/debug/dri/{card_num}/ttm/vram0/info");
+                        if let Ok(ttm_info) = std::fs::read_to_string(&ttm_path) {
+                            for line in ttm_info.lines() {
+                                let trimmed = line.trim().to_lowercase();
+                                if let Some(val) = trimmed.strip_prefix("total:") {
+                                    if let Ok(pages) = val.trim().parse::<u64>() {
+                                        let bytes = pages * 4096;
+                                        if bytes > 0 {
+                                            vram_gb = Some(
+                                                bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                         }
+                    }
+                }
+
+                // Fall back to known PCI device ID lookup
+                let known_info = intel_dgpu_info(&device_id);
+                if vram_gb.is_none() {
+                    if let Some((_, known_vram)) = known_info {
+                        vram_gb = Some(known_vram);
+                    }
+                }
+
+                let is_discrete = is_xe || vram_gb.is_some() || known_info.is_some();
+
+                // Skip integrated GPUs with no VRAM unless they're Arc-class
+                if !is_discrete && vram_gb.is_none() {
+                    let has_arc = lspci.as_ref().is_some_and(|text| {
+                        text.lines().any(|l| {
+                            let lower = l.to_lowercase();
+                            lower.contains("intel") && lower.contains("arc")
+                        })
+                    });
+                    if !has_arc {
+                        continue;
+                    }
+                    vram_gb = Some(0.0);
+                }
+
+                // Determine GPU name: PCI ID table > lspci > fallback
+                let gpu_name = if let Some((name, _)) = known_info {
+                    name.to_string()
+                } else if let Some(name) =
+                    Self::intel_gpu_name_from_lspci(&lspci, &device_path)
+                {
+                    name
+                } else if is_discrete {
+                    format!("Intel Arc ({})", device_id)
+                } else {
+                    "Intel Arc".to_string()
+                };
+
+                let is_igpu = vram_gb == Some(0.0);
+                gpus.push(GpuInfo {
+                    name: gpu_name,
+                    vram_gb,
+                    backend: GpuBackend::Sycl,
+                    count: 1,
+                    unified_memory: is_igpu,
+                });
+            }
+        }
+
+        // If sysfs found nothing, try lspci as last resort
+        if gpus.is_empty() {
+            if let Some(ref text) = lspci {
+                for line in text.lines() {
+                    let lower = line.to_lowercase();
+                    if lower.contains("intel")
+                        && (lower.contains("arc") || lower.contains("device e2"))
+                    {
+                        let vram = Self::extract_intel_pci_id(line)
+                            .and_then(|id| intel_dgpu_info(&id))
+                            .map(|(_, v)| v)
+                            .unwrap_or(0.0);
+                        let name = Self::extract_intel_pci_id(line)
+                            .and_then(|id| intel_dgpu_info(&id).map(|(n, _)| n.to_string()))
+                            .unwrap_or_else(|| "Intel Arc".to_string());
+                        gpus.push(GpuInfo {
+                            name,
+                            vram_gb: Some(vram),
+                            backend: GpuBackend::Sycl,
+                            count: 1,
+                            unified_memory: vram == 0.0,
+                        });
                     }
                 }
             }
         }
 
-        // Fallback: check lspci directly for Intel Arc devices
-        // (covers cases where sysfs isn't available or card dirs don't exist)
-        if let Some(text) = Self::lspci_output() {
-            for line in text.lines() {
-                let lower = line.to_lowercase();
-                if lower.contains("intel") && lower.contains("arc") {
-                    return Some(0.0);
+        // Deduplicate same-model GPUs: aggregate VRAM and increment count
+        let mut deduped: Vec<GpuInfo> = Vec::new();
+        for gpu in gpus {
+            if let Some(existing) = deduped.iter_mut().find(|g| g.name == gpu.name) {
+                existing.count += 1;
+                if let (Some(ev), Some(gv)) = (existing.vram_gb.as_mut(), gpu.vram_gb) {
+                    *ev += gv;
                 }
+            } else {
+                deduped.push(gpu);
             }
         }
 
+        deduped
+    }
+
+    /// Extract GPU name from lspci output by matching the PCI slot of a sysfs device.
+    fn intel_gpu_name_from_lspci(
+        lspci: &Option<String>,
+        device_path: &std::path::Path,
+    ) -> Option<String> {
+        let lspci_text = lspci.as_ref()?;
+        // Read PCI slot name from uevent (e.g. "0000:03:00.0")
+        let uevent = std::fs::read_to_string(device_path.join("uevent")).ok()?;
+        let slot = uevent
+            .lines()
+            .find(|l| l.starts_with("PCI_SLOT_NAME="))
+            .and_then(|l| l.strip_prefix("PCI_SLOT_NAME="))?;
+        for line in lspci_text.lines() {
+            if line.contains(slot) && line.to_lowercase().contains("intel") {
+                if let Some(pos) = line.find("Intel Corporation") {
+                    let after = line[pos + "Intel Corporation".len()..].trim();
+                    // Skip if lspci only shows raw "Device XXXX" (pci.ids outdated)
+                    if !after.is_empty()
+                        && !after.starts_with("Device ")
+                        && after != "Device"
+                    {
+                        // Strip trailing PCI ID bracket like [e211]
+                        let clean = if let Some(bracket) = after.rfind('[') {
+                            after[..bracket].trim()
+                        } else {
+                            after
+                        };
+                        return Some(format!("Intel {}", clean));
+                    }
+                }
+            }
+        }
         None
+    }
+
+    /// Extract Intel PCI device ID from lspci -nnD output line.
+    /// e.g. "[8086:e211]" -> "0xe211"
+    fn extract_intel_pci_id(line: &str) -> Option<String> {
+        let marker = "[8086:";
+        let start = line.find(marker)? + marker.len();
+        let end = line[start..].find(']')? + start;
+        Some(format!("0x{}", &line[start..end]))
     }
 
     /// Detect Apple Silicon GPU via system_profiler.
@@ -1972,6 +2120,27 @@ pub fn quant_min_compute_capability(quantization: &str) -> Option<(u8, u8)> {
     }
 }
 
+/// Known Intel Arc discrete GPU PCI device IDs and their (name, VRAM in GB).
+fn intel_dgpu_info(device_id: &str) -> Option<(&'static str, f64)> {
+    match device_id {
+        // Battlemage (Arc B-series)
+        "0xe20b" | "0xe20c" => Some(("Intel Arc B580", 12.0)),
+        "0xe20d" => Some(("Intel Arc B570", 10.0)),
+        "0xe210" | "0xe211" => Some(("Intel Arc Pro B60", 24.0)),
+        // Alchemist (Arc A-series)
+        "0x56a0" | "0x56a1" => Some(("Intel Arc A770", 16.0)),
+        "0x5604" => Some(("Intel Arc A750", 8.0)),
+        "0x56a5" | "0x56a6" => Some(("Intel Arc A580", 8.0)),
+        "0x56c0" => Some(("Intel Arc A770M", 16.0)),
+        "0x56c1" => Some(("Intel Arc A730M", 12.0)),
+        "0x5690" | "0x5691" => Some(("Intel Arc A370M", 4.0)),
+        "0x5692" => Some(("Intel Arc A350M", 4.0)),
+        "0x56b0" => Some(("Intel Arc Pro A30M", 4.0)),
+        "0x56b1" => Some(("Intel Arc Pro A40", 6.0)),
+        _ => None,
+    }
+}
+
 /// Fallback VRAM estimation from GPU model name.
 /// Used when nvidia-smi or other tools report 0 VRAM.
 fn estimate_vram_from_name(name: &str) -> f64 {
@@ -2185,6 +2354,33 @@ fn estimate_vram_from_name(name: &str) -> f64 {
         && (lower.contains("graphics") || lower.contains("igpu"))
     {
         return 0.5;
+    }
+
+    // Intel Arc B-series (Battlemage)
+    if lower.contains("arc") && lower.contains("b580") {
+        return 12.0;
+    }
+    if lower.contains("arc") && lower.contains("b570") {
+        return 10.0;
+    }
+    if lower.contains("arc") && lower.contains("pro b60") {
+        return 24.0;
+    }
+    // Intel Arc A-series (Alchemist)
+    if lower.contains("arc") && lower.contains("a770") {
+        return 16.0;
+    }
+    if lower.contains("arc") && lower.contains("a750") {
+        return 8.0;
+    }
+    if lower.contains("arc") && lower.contains("a580") {
+        return 8.0;
+    }
+    if lower.contains("arc") && lower.contains("a380") {
+        return 6.0;
+    }
+    if lower.contains("arc") && lower.contains("a310") {
+        return 4.0;
     }
 
     // Generic fallbacks
